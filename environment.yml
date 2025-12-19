@@ -1,0 +1,13 @@
+name: storyhop-graph
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - llama-index
+      - llama-index-graph-stores-neo4j
+      - llama-index-llms-openai
+      - llama-index-llms-ollama
+      - python-dotenv
+      - tqdm

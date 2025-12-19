@@ -1,0 +1,92 @@
+run:
+  input_path: data/1_宗亲家的小娘子_8000.txt
+  book_id: novel
+  reset: false
+  debug: true
+  save_jsonl: extractions_subset.jsonl
+  limit_chunks: null
+  parse_max_retries: 2
+  retry_backoff_s: 2.0
+
+  # Reusable defaults for DataFactory-generated QA tasks
+  qa:
+    language: zh
+    answer_max_chars: 40
+    min_question_len: 12
+    max_retries: 2
+    retry_backoff_s: 2.0
+
+    # If true, the QA generator queries Neo4j for per-chunk character spans
+    # (char_start/char_end) and adds them to the prompt context.
+    enrich_from_neo4j: true
+
+chunking:
+  chunk_chars: 2000
+  chunk_overlap: 200
+
+llm:
+  openai:
+    model: gpt-5-mini
+    api_key: ${OPENAI_API_KEY}
+    timeout_s: 180.0
+    max_retries: 3
+    max_output_tokens: 1200
+    additional_kwargs: null
+
+neo4j:
+  uri: ${NEO4J_URI}
+  username: ${NEO4J_USERNAME}
+  password: ${NEO4J_PASSWORD}
+  database: neo4j
+
+khop:
+  enabled: true
+  seed: 42
+
+  # hop length
+  k: [3, 4, 5]
+
+  # how many chains to sample
+  num_chains: 20
+
+  # how many candidate k-hop paths to ask Neo4j for per sampling try
+  candidate_limit: 100
+
+  # max_sampling_tries
+  max_sampling_tries: 5
+
+  # enforce "true" k-hop (no shorter path exists)
+  enforce_no_shorter_path: true
+
+  # enforce uniqueness: exactly one k-hop path between (s,t)
+  enforce_unique_khop_path: true
+
+  # require evidence spans from >= N distinct chunk_ids across edges
+  min_distinct_chunks: 2
+
+  exclude_rel_types:
+    - MENTIONS
+
+  start_labels: ["PERSON"]
+  end_labels: []
+
+  # optional: write sampled chains to JSONL
+  output_jsonl: chains/khop_chain.jsonl
+
+data_factory:
+  enabled: true
+  tasks:
+    - name: khop_reader_qa
+      k: [3,4,5]
+      input_jsonl: chains/khop_chain.jsonl
+      output_jsonl: outputs/khop_chain_QA.jsonl
+      prompt_builder: reader_qa_zh
+      limit_items: 5
+
+    - name: khop_temporal_order_qa
+      k: [5]
+      input_jsonl: chains/khop_chain.jsonl
+      output_jsonl: outputs/khop_chain_temporal_QA.jsonl
+      prompt_builder: temporal_order_zh
+      limit_items: 0
+
