@@ -9,18 +9,20 @@ def _chain_text_from_steps(steps: List[Dict[str, Any]]) -> str:
     return " -> ".join(names)
 
 
-def build_chain_features(item: Dict[str, Any]) -> Dict[str, Any]:
+def build_chain_features(item: Dict[str, Any], cfg: Dict[str, Any] | None = None) -> Dict[str, Any]:
     """Extract task-agnostic features from a sampled k-hop chain.
 
-    This is intentionally generic: it produces reusable fields that prompt
-    builders can use to formulate different question types (retrieval, temporal
-    ordering, causal/intent inference, etc.).
+    Updated to match the new chain JSONL schema:
+      - labels removed from nodes
+      - cypher_visualize_full renamed to full_query
+      - meta removed; s_eid/t_eid are top-level fields
+      - QA defaults pulled from cfg["run"]["qa"] if cfg is provided
     """
-
     chain = item["chain"]
     steps = chain["steps"]
 
-    k = len(steps)
+    # Prefer actual hop count in steps; fall back to item["k"] (they should match)
+    k = len(steps) if steps else int(item["k"])
 
     node_names: List[str] = [steps[0]["source"]["name"]] + [st["target"]["name"] for st in steps]
     rel_types: List[str] = [st["relation"]["type"] for st in steps]
@@ -28,10 +30,7 @@ def build_chain_features(item: Dict[str, Any]) -> Dict[str, Any]:
     chunk_ids_in_order: List[Any] = [st["chunk_id"] for st in steps]
 
     # Normalize chunk ids to ints when possible (useful for ordering/span signals)
-    chunk_ids_int: List[int] = []
-    for cid in chunk_ids_in_order:
-        # chunk ids are expected to be numeric in this pipeline
-        chunk_ids_int.append(int(cid))
+    chunk_ids_int: List[int] = [int(cid) for cid in chunk_ids_in_order]
 
     uniq_chunk_ids: List[int] = []
     for cid in chunk_ids_int:
@@ -45,23 +44,32 @@ def build_chain_features(item: Dict[str, Any]) -> Dict[str, Any]:
     nondecreasing = all(chunk_ids_int[i] <= chunk_ids_int[i + 1] for i in range(len(chunk_ids_int) - 1))
     strictly_increasing = all(chunk_ids_int[i] < chunk_ids_int[i + 1] for i in range(len(chunk_ids_int) - 1))
 
-    chain_with_evidence_lines = []
-    for i, st in enumerate(steps):
+    chain_with_evidence_lines: List[str] = []
+    for st in steps:
         hop = st["hop"]
         src = st["source"]["name"]
         rel = st["relation"]["type"]
         tgt = st["target"]["name"]
         ev = st["evidence"].replace("\n", " ").strip()
         cid = st["chunk_id"]
-        chain_with_evidence_lines.append(
-            f"- hop{hop}: {src} --[{rel}]--> {tgt} | evidence: {ev} | chunk_id: {cid}"
-        )
+        chain_with_evidence_lines.append(f"- hop{hop}: {src} --[{rel}]--> {tgt} | evidence: {ev} | chunk_id: {cid}")
+
+    # Defaults from config (new structure)
+    qa_defaults: Dict[str, Any] = (cfg or {}).get("run", {}).get("qa", {})
+    answer_max_chars = int(qa_defaults.get("answer_max_chars", 40))
+    min_question_len = int(qa_defaults.get("min_question_len", 12))
+    language = qa_defaults.get("language", "zh")
 
     return {
+        # identity
         "book_id": item["book_id"],
         "chain_id": item["chain_id"],
-        "k": item["k"],
+        "k": int(item.get("k", k)),
         "final_answer": item["final_answer"],
+        "s_eid": item.get("s_eid"),
+        "t_eid": item.get("t_eid"),
+
+        # chain content
         "start_entity": chain["start"]["name"],
         "end_entity": chain["end"]["name"],
         "node_names_in_order": node_names,
@@ -69,14 +77,25 @@ def build_chain_features(item: Dict[str, Any]) -> Dict[str, Any]:
         "evidences_in_order": evidences,
         "chunks_in_chain_order": chunk_ids_int,
         "chunk_ids_unique": uniq_chunk_ids,
+
+        # simple signals
         "min_chunk_id": min_chunk_id,
         "max_chunk_id": max_chunk_id,
         "chunk_span": (max_chunk_id - min_chunk_id) if (min_chunk_id is not None and max_chunk_id is not None) else None,
         "chunk_order_monotonic_inc": nondecreasing,
         "chunk_order_monotonic_strict": strictly_increasing,
+
+        # renderings
         "gold_chain_text": _chain_text_from_steps(steps),
         "chain_with_evidence": "\n".join(chain_with_evidence_lines),
-        "cypher_visualize_full": item["cypher_visualize_full"],
+
+        # query debug
+        "full_query": item.get("full_query"),
+
+        # QA defaults (so prompt builders don't need cfg)
+        "language": language,
+        "answer_max_chars": answer_max_chars,
+        "min_question_len": min_question_len,
     }
 
 
@@ -84,7 +103,7 @@ def build_chain_features(item: Dict[str, Any]) -> Dict[str, Any]:
 # Prompt builders (task-specific)
 # =========================
 
-def reader_qa_zh(ctx: Dict[str, Any]) -> str:
+def khop_qa_zh(ctx: Dict[str, Any]) -> str:
     k = ctx["k"]
     final_ans = ctx["final_answer"]
     start_ent = ctx["start_entity"]
@@ -119,49 +138,6 @@ def reader_qa_zh(ctx: Dict[str, Any]) -> str:
 {chain_str}
 """.strip()
 
-
-def temporal_order_zh(ctx: Dict[str, Any]) -> str:
-    """Ask for temporal ordering / relative sequence inferred via the chain.
-
-    This template encourages a reader-style question that hinges on when/what
-    happened first/earlier vs later along the implied narrative progression.
-    """
-
-    k = ctx["k"]
-    final_ans = ctx["final_answer"]
-    start_ent = ctx["start_entity"]
-    chain_str = ctx["chain_with_evidence"]
-    answer_max_chars = ctx["answer_max_chars"]
-    min_q_len = ctx["min_question_len"]
-
-    return f"""
-你是长篇小说阅读类 benchmark 的出题员。现在给你一条从原文抽取出来的多跳线索与证据片段。
-你的任务：写出一个读者会问的“时间顺序/先后关系”问题，以及一个简短回答。
-
-链路长度：k={k}
-
-严格要求：
-1) 问题必须要求读者结合多条线索推断“先后/紧接/之前/之后”的关系，而不是单句就能回答。
-2) 问题不能出现“hop/链路/图/关系类型/chunk/评测”等结构化词汇。
-3) 问题中不得出现最终答案的字符串：{final_ans}
-4) 只能使用给定 evidence 的信息，不要编造剧情；尽量自然转述，不要整句照搬。
-5) 问题长度至少 {min_q_len} 个中文字符。
-6) 回答要简短（<= {answer_max_chars} 个中文字符），并且必须包含最终答案实体：{final_ans}。
-
-输出格式（只输出严格 JSON，不要输出任何多余文字）：
-{{
-  "question": "...",
-  "answer": "..."
-}}
-
-起点实体（建议在问题中作为剧情锚点出现）：{start_ent}
-
-线索与证据：
-{chain_str}
-""".strip()
-
-
 PROMPT_BUILDERS = {
-    "reader_qa_zh": reader_qa_zh,
-    "temporal_order_zh": temporal_order_zh,
+    "khop_qa_zh": khop_qa_zh,
 }

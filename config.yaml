@@ -39,54 +39,32 @@ neo4j:
   password: ${NEO4J_PASSWORD}
   database: neo4j
 
-khop:
-  enabled: true
-  seed: 42
+# -----------------------------------------------------------------------------
+# Each DataFactory task references one of these via chains_gen_cfg_key.
+# -----------------------------------------------------------------------------
+chain_gens:
+  khop_default:
+    enabled: true
+    seed: 42
+    k: [3, 4, 5]
+    num_chains: 3
+    max_sampling_tries: 5
+    exclude_rel_types: ["MENTION"]
+    start_labels: ["PERSON"]
+    end_labels: []
 
-  # hop length
-  k: [3, 4, 5]
-
-  # how many chains to sample
-  num_chains: 20
-
-  # how many candidate k-hop paths to ask Neo4j for per sampling try
-  candidate_limit: 100
-
-  # max_sampling_tries
-  max_sampling_tries: 5
-
-  # enforce "true" k-hop (no shorter path exists)
-  enforce_no_shorter_path: true
-
-  # enforce uniqueness: exactly one k-hop path between (s,t)
-  enforce_unique_khop_path: true
-
-  # require evidence spans from >= N distinct chunk_ids across edges
-  min_distinct_chunks: 2
-
-  exclude_rel_types:
-    - MENTIONS
-
-  start_labels: ["PERSON"]
-  end_labels: []
-
-  # optional: write sampled chains to JSONL
-  output_jsonl: chains/khop_chain.jsonl
-
+# -----------------------------------------------------------------------------
+# DataFactory
+# -----------------------------------------------------------------------------
 data_factory:
   enabled: true
+  mode: "llm_qa"  # "chain_gen" | "llm_qa" | "all"
   tasks:
-    - name: khop_reader_qa
-      k: [3,4,5]
+    - name: khop_qa
+      chains_gen: khop_chain_gen
+      chains_gen_cfg_key: khop_default
+      llm_qa: khop_llm_qa
+      prompt_builder: khop_qa_zh
       input_jsonl: chains/khop_chain.jsonl
       output_jsonl: outputs/khop_chain_QA.jsonl
-      prompt_builder: reader_qa_zh
-      limit_items: 5
-
-    - name: khop_temporal_order_qa
-      k: [5]
-      input_jsonl: chains/khop_chain.jsonl
-      output_jsonl: outputs/khop_chain_temporal_QA.jsonl
-      prompt_builder: temporal_order_zh
-      limit_items: 0
-
+      limit_items: null

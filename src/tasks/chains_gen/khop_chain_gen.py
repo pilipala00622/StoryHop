@@ -7,8 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from neo4j import GraphDatabase
 
-from src.utils.config_utils import load_config
-from src.utils.log_utils import log, warn, debug, set_debug
+from src.utils.log_utils import debug, log, set_debug, warn
 
 
 # =========================
@@ -58,13 +57,9 @@ def cypher_sample_khop_paths(k: int) -> str:
       elementId(t) AS t_eid,
 
       coalesce(s.display_name, s.name, s.id, elementId(s)) AS s_name,
-      labels(s) AS s_labels,
-
       coalesce(t.display_name, t.name, t.id, elementId(t)) AS t_name,
-      labels(t) AS t_labels,
 
       [n IN nodes(p) | coalesce(n.display_name, n.name, n.id, elementId(n))] AS node_names,
-      [n IN nodes(p) | labels(n)] AS node_labels,
 
       [r IN rels | type(r)] AS rel_types,
       [r IN rels | coalesce(r.description, '')] AS rel_descs,
@@ -104,7 +99,6 @@ def cypher_count_khop_paths(k: int) -> str:
 # =========================
 def build_chain_object(row: Dict[str, Any]) -> Dict[str, Any]:
     node_names = row["node_names"]
-    node_labels = row["node_labels"]
     rel_types = row["rel_types"]
     rel_descs = row["rel_descs"]
     evidences = row["evidences"]
@@ -115,9 +109,9 @@ def build_chain_object(row: Dict[str, Any]) -> Dict[str, Any]:
         steps.append(
             {
                 "hop": i + 1,
-                "source": {"name": node_names[i], "labels": node_labels[i]},
+                "source": {"name": node_names[i]},
                 "relation": {"type": rel_types[i], "description": rel_descs[i]},
-                "target": {"name": node_names[i + 1], "labels": node_labels[i + 1]},
+                "target": {"name": node_names[i + 1]},
                 "evidence": evidences[i],
                 "chunk_id": chunk_ids[i],
             }
@@ -129,8 +123,8 @@ def build_chain_object(row: Dict[str, Any]) -> Dict[str, Any]:
             ref_chunks.append(cid)
 
     return {
-        "start": {"name": node_names[0], "labels": node_labels[0]},
-        "end": {"name": node_names[-1], "labels": node_labels[-1]},
+        "start": {"name": node_names[0]},
+        "end": {"name": node_names[-1]},
         "steps": steps,
         "ref_chunks": ref_chunks,
     }
@@ -165,22 +159,40 @@ def unique_khop(session, book_id: str, exclude_rel_types: List[str], s_eid: str,
 # Cypher param injection for "complete query"
 # =========================
 def cypher_quote(s: str) -> str:
-    s = s.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{s}"'
+    # Use single quotes in Cypher so we don't introduce backslashes when JSON-serializing.
+    # Escape single quotes by doubling them (Cypher string literal rule).
+    s = s.replace("'", "''")
+    return f"'{s}'"
 
 
 def cypher_list_str(xs: List[str]) -> str:
     return "[" + ", ".join(cypher_quote(x) for x in xs) + "]"
 
 
-def build_full_visualize_query(k: int, book_id: str, exclude_rel_types: List[str], s_eid: str, t_eid: str) -> str:
-    return (
-        f"MATCH p=(s)-[rels*{k}]->(t)\n"
-        f"WHERE elementId(s) = {cypher_quote(s_eid)}\n"
-        f"  AND elementId(t) = {cypher_quote(t_eid)}\n"
-        f"  AND ALL(r IN rels WHERE r.book_id = {cypher_quote(book_id)} AND NOT type(r) IN {cypher_list_str(exclude_rel_types)})\n"
-        f"RETURN p\n"
-        f"LIMIT 1"
+def build_full_visualize_query(
+    k: int,
+    book_id: str,
+    exclude_rel_types: List[str],
+    s_eid: str,
+    t_eid: str,
+) -> str:
+    """
+    Build a Cypher query to visualize a k-hop directed path from s to t.
+
+    Requirements:
+    - No literal '\\n' or backslashes in the produced query string.
+    - Returned as a single line for clean JSONL/logging.
+    """
+    return " ".join(
+        [
+            f"MATCH p=(s)-[rels*{k}]->(t)",
+            f"WHERE elementId(s) = {cypher_quote(s_eid)}",
+            f"AND elementId(t) = {cypher_quote(t_eid)}",
+            f"AND ALL(r IN rels WHERE r.book_id = {cypher_quote(book_id)}",
+            f"AND NOT type(r) IN {cypher_list_str(exclude_rel_types)})",
+            "RETURN p",
+            "LIMIT 1",
+        ]
     )
 
 
@@ -237,9 +249,8 @@ def load_existing_state(output_jsonl: str, book_id: str):
             seen_sigs_by_k.setdefault(kk, set())
             max_suffix_by_k.setdefault(kk, -1)
 
-            meta = it["meta"]
-            s_eid = meta.get("s_eid")
-            t_eid = meta.get("t_eid")
+            s_eid = it.get("s_eid")
+            t_eid = it.get("t_eid")
             if s_eid and t_eid:
                 seen_pairs_by_k[kk].add((s_eid, t_eid))
 
@@ -263,37 +274,45 @@ def normalize_k_list(k_value: Any) -> List[int]:
     return [int(k_value)]
 
 
-# =========================
-# main
-# =========================
-def main() -> None:
-    cfg = load_config()
-    set_debug(cfg["run"]["debug"])
+def run_task(cfg: Dict[str, Any], task_cfg: Dict[str, Any]) -> None:
+    """Entry point for DataFactory.
 
-    kh = cfg["khop"]
-    if not kh["enabled"]:
-        log("khop.enabled=false; exiting")
+    Reads chain generator params from task_cfg["chains_gen_cfg"] (Option B) and writes
+    sampled chains to task_cfg["input_jsonl"] (append mode).
+
+    Conventions (per project decisions):
+      - enforce_no_shorter_path = True (always)
+      - enforce_unique_khop_path = True (always)
+      - min_distinct_chunks = 2 (always)
+      - candidate_limit not in config; fixed internal default
+    """
+    kh = task_cfg["chains_gen_cfg"]
+    if cfg.get("run", {}).get("debug"):
+        set_debug(True)
+
+    if not kh.get("enabled", True):
+        log("chains_gen.disabled; exiting")
         return
 
     book_id = cfg["run"]["book_id"]
     k_list = normalize_k_list(kh["k"])
     num_chains = int(kh["num_chains"])  # per k
 
-    candidate_limit = int(kh["candidate_limit"])
+    candidate_limit = 100
     max_sampling_tries = int(kh["max_sampling_tries"])
-
-    enforce_no_shorter = bool(kh["enforce_no_shorter_path"])
-    enforce_unique = bool(kh["enforce_unique_khop_path"])
-    min_distinct_chunks = int(kh["min_distinct_chunks"])
+    enforce_no_shorter = True
+    enforce_unique = True
+    min_distinct_chunks = 2
 
     exclude_rel_types = kh["exclude_rel_types"]
-    start_labels = kh["start_labels"]
-    end_labels = kh["end_labels"]
+    start_labels = kh.get("start_labels", [])
+    end_labels = kh.get("end_labels", [])
 
-    output_jsonl = kh["output_jsonl"]
+    # For chain_gen stage, we write chains to task_cfg["input_jsonl"]
+    output_jsonl = task_cfg["input_jsonl"]
     os.makedirs(os.path.dirname(os.path.abspath(output_jsonl)) or ".", exist_ok=True)
 
-    random.seed(int(kh["seed"]))
+    random.seed(int(kh.get("seed", 0)))
 
     log("k-hop chain sampler (append mode, multi-k)")
     log(f"book_id={book_id} | k_list={k_list} | num_chains_per_k={num_chains}")
@@ -304,7 +323,6 @@ def main() -> None:
     log(f"output_jsonl={output_jsonl}")
 
     seen_pairs_by_k, seen_sigs_by_k, next_index_by_k, existing_count_by_k = load_existing_state(output_jsonl, book_id)
-    seen_pairs_global = set().union(*seen_pairs_by_k.values()) if seen_pairs_by_k else set()
 
     for kk in k_list:
         log(f"[existing] k={kk} count={existing_count_by_k.get(kk, 0)} next_index={next_index_by_k.get(kk, 0)}")
@@ -356,9 +374,7 @@ def main() -> None:
                     if not s_eid or not t_eid:
                         continue
 
-                    # DEDUPE: existing or already accepted in this run (for this k)
                     if (s_eid, t_eid) in seen_pairs_by_k[k]:
-                    # if (s_eid, t_eid) in seen_pairs_global:
                         continue
 
                     if enforce_no_shorter and has_shorter_path(session, book_id, exclude_rel_types, s_eid, t_eid, k):
@@ -373,13 +389,10 @@ def main() -> None:
                     if sig in seen_sigs_by_k[k]:
                         continue
 
-                    # Accept => update dedupe state immediately
                     seen_pairs_by_k[k].add((s_eid, t_eid))
-                    seen_pairs_global.add((s_eid, t_eid))
-
                     seen_sigs_by_k[k].add(sig)
 
-                    full_vis_q = build_full_visualize_query(
+                    full_query = build_full_visualize_query(
                         k=k,
                         book_id=book_id,
                         exclude_rel_types=exclude_rel_types,
@@ -393,36 +406,23 @@ def main() -> None:
                         "book_id": book_id,
                         "k": k,
                         "chain_id": chain_id,
+                        "s_eid": s_eid,
+                        "t_eid": t_eid,
                         "chain": chain,
                         "final_answer": chain["end"]["name"],
-                        "meta": {
-                            "s_eid": s_eid,
-                            "t_eid": t_eid,
-                            "s_name": row.get("s_name"),
-                            "t_name": row.get("t_name"),
-                            "s_labels": row.get("s_labels"),
-                            "t_labels": row.get("t_labels"),
-                        },
-                        "cypher_visualize_full": full_vis_q,
+                        "full_query": full_query,
                     }
 
                     accepted_new_k.append(item)
                     accepted_all.append(item)
 
-                    log(f"[k={k}] [ACCEPT {len(accepted_new_k)}/{num_chains}] {item['meta']['s_name']} -> {item['meta']['t_name']}")
-                    print("Gold chain:", " -> ".join([chain["start"]["name"]] + [st["target"]["name"] for st in chain["steps"]]))
-                    print("Ref chunks:", chain["ref_chunks"])
-                    print("---- FULL CYPHER (paste into Aura Browser) ----")
-                    print(item["cypher_visualize_full"])
-                    print("=" * 100)
+                    log(f"[k={k}] [ACCEPT {len(accepted_new_k)}/{num_chains}] {row.get('s_name')} -> {row.get('t_name')}")
 
-            # bump next index for this k so future runs continue correctly
             next_index_by_k[k] = next_index_by_k[k] + len(accepted_new_k)
             log(f"[k={k}] done. new_accepted={len(accepted_new_k)} tries={tries}")
 
     driver.close()
 
-    # APPEND mode
     if accepted_all:
         with open(output_jsonl, "a", encoding="utf-8") as f:
             for it in accepted_all:
@@ -430,7 +430,3 @@ def main() -> None:
         log(f"Appended {len(accepted_all)} chains total to: {output_jsonl}")
     else:
         log("No new chains accepted; nothing appended.")
-
-
-if __name__ == "__main__":
-    main()
