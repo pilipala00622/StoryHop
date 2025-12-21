@@ -29,6 +29,10 @@ def main() -> None:
         log(f"LLM initialized: {llm_name}")
 
     for task_cfg in cfg["data_factory"]["tasks"]:
+        if int(task_cfg["limit_items"]) == 0:
+            log(f"Skipping DataFactory task: {task_cfg['name']} (limit_items=0)")
+            continue
+
         name = task_cfg["name"]
         log("-" * 80)
         log(f"Running DataFactory task: {name} (mode={mode})")
@@ -43,7 +47,7 @@ def main() -> None:
 
         if mode in ("chain_gen", "all"):
             chain_mod = importlib.import_module(f"src.tasks.chains_gen.{task_cfg['chains_gen']}")
-            chain_mod.run_task(cfg=cfg, task_cfg=task_cfg)
+            chain_mod.run_chain_gen(cfg=cfg, task_cfg=task_cfg)
 
         if mode in ("llm_qa", "all"):
             qa_mod = importlib.import_module(f"src.tasks.llm_qa.{task_cfg['llm_qa']}")

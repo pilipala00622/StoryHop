@@ -274,7 +274,7 @@ def normalize_k_list(k_value: Any) -> List[int]:
     return [int(k_value)]
 
 
-def run_task(cfg: Dict[str, Any], task_cfg: Dict[str, Any]) -> None:
+def run_chain_gen(cfg: Dict[str, Any], task_cfg: Dict[str, Any]) -> None:
     """Entry point for DataFactory.
 
     Reads chain generator params from task_cfg["chains_gen_cfg"] (Option B) and writes
@@ -309,7 +309,7 @@ def run_task(cfg: Dict[str, Any], task_cfg: Dict[str, Any]) -> None:
     end_labels = kh.get("end_labels", [])
 
     # For chain_gen stage, we write chains to task_cfg["input_jsonl"]
-    output_jsonl = task_cfg["input_jsonl"]
+    output_jsonl = task_cfg["qa_input_jsonl"]
     os.makedirs(os.path.dirname(os.path.abspath(output_jsonl)) or ".", exist_ok=True)
 
     random.seed(int(kh.get("seed", 0)))

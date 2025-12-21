@@ -47,24 +47,107 @@ chain_gens:
     enabled: true
     seed: 42
     k: [3, 4, 5]
-    num_chains: 3
+    num_chains: 10
     max_sampling_tries: 5
     exclude_rel_types: ["MENTION"]
     start_labels: ["PERSON"]
     end_labels: []
+
+  attribute_lookup:
+    enabled: true
+    answer_max_chars: 40
+    source_input_jsonl: chains/khop_chain.jsonl
+    allowed_rel_types: ["HAS_TITLE", "HAS_ROLE", "LOCATED_IN", "IS_A", "HAS_IDENTITY", "HAS_STATUS"]
+
+  who_act_what:
+    enabled: true
+    source_input_jsonl: chains/khop_chain.jsonl
+    require_match: true
+    speech_hints: ["说","问","答","道","喊","骂","吩咐","嘱咐","冷笑","开口","斥","训","指责","叫"]
+    quote_hints: ["“","”","\"","『","』","「","」"]
+
+  # -----------------------------
+  # NEW: Local co-reference (single chunk)
+  # -----------------------------
+  local_coref:
+    enabled: true
+    source_input_jsonl: chains/khop_chain.jsonl
+    pronoun_hints: ["他","她","那人","此人","其","那位","此君","那家伙"]
+
+  # -----------------------------
+  # NEW: Coreference across hops via explicit alias edges
+  # -----------------------------
+  alias_coref:
+    enabled: true
+    source_input_jsonl: chains/khop_chain.jsonl
+    # Tune to your Neo4j edge types that encode alias identity.
+    alias_rel_types: ["ALIAS_OF","SAME_AS","HAS_ALIAS","MENTION_ALIAS","ALIAS"]
 
 # -----------------------------------------------------------------------------
 # DataFactory
 # -----------------------------------------------------------------------------
 data_factory:
   enabled: true
-  mode: "llm_qa"  # "chain_gen" | "llm_qa" | "all"
+  mode: "all"  # "chain_gen" | "llm_qa" | "all"
   tasks:
     - name: khop_qa
       chains_gen: khop_chain_gen
       chains_gen_cfg_key: khop_default
       llm_qa: khop_llm_qa
       prompt_builder: khop_qa_zh
-      input_jsonl: chains/khop_chain.jsonl
-      output_jsonl: outputs/khop_chain_QA.jsonl
-      limit_items: null
+      qa_input_jsonl: chains/khop_chain.jsonl
+      qa_output_jsonl: outputs/khop_chain_QA.jsonl
+      limit_items: 0
+      k: [3, 4, 5]
+
+    - name: single_span_qa
+      chains_gen: khop_chain_gen
+      chains_gen_cfg_key: khop_default
+      llm_qa: single_span_llm_qa
+      prompt_builder: single_span_qa_zh
+      qa_input_jsonl: chains/khop_chain.jsonl
+      qa_output_jsonl: outputs/single_span_QA.jsonl
+      limit_items: 0
+      k: [3, 4, 5]
+
+    - name: attribute_lookup_qa
+      chains_gen: attribute_lookup_chain_gen
+      chains_gen_cfg_key: attribute_lookup
+      llm_qa: attribute_lookup_llm_qa
+      prompt_builder: attribute_lookup_zh
+      qa_input_jsonl: chains/attribute_lookup_chain.jsonl
+      qa_output_jsonl: outputs/attribute_lookup_QA.jsonl
+      limit_items: 0
+      k: [3, 4, 5]
+
+    - name: who_act_what_qa
+      chains_gen: who_act_what_chain_gen
+      chains_gen_cfg_key: who_act_what
+      llm_qa: who_act_what_llm_qa
+      prompt_builder: who_act_what_zh
+      qa_input_jsonl: chains/who_act_what_chain.jsonl
+      qa_output_jsonl: outputs/who_act_what_QA.jsonl
+      limit_items: 0
+      k: [3, 4, 5]
+
+    - name: local_coref_qa
+      chains_gen: local_coref_chain_gen
+      chains_gen_cfg_key: local_coref
+      llm_qa: local_coref_llm_qa
+      prompt_builder: local_coref_zh
+      qa_input_jsonl: chains/local_coref_chain.jsonl
+      qa_output_jsonl: outputs/local_coref_QA.jsonl
+      limit_items: 0
+      k: [3, 4, 5]
+
+
+    # Relationship (ALIAS_OF, SAME_AS, HAS_ALIAS, MENTION_ALIAS, ALIAS) not in graph yet
+    - name: alias_coref_qa
+      chains_gen: alias_coref_chain_gen
+      chains_gen_cfg_key: alias_coref
+      llm_qa: alias_coref_llm_qa
+      prompt_builder: alias_coref_zh
+      qa_input_jsonl: chains/alias_coref_chain.jsonl
+      qa_output_jsonl: outputs/alias_coref_QA.jsonl
+      limit_items: 0
+      k: [3, 4, 5]

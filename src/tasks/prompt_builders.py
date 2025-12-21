@@ -138,6 +138,159 @@ def khop_qa_zh(ctx: Dict[str, Any]) -> str:
 {chain_str}
 """.strip()
 
+def single_span_qa_zh(ctx: Dict[str, Any]) -> str:
+    anchor = ctx["anchor_entity"]
+    target = ctx["final_answer"]
+    ev = ctx["evidence"]
+    min_q_len = ctx["min_question_len"]
+
+    return f"""
+你是长篇小说阅读类 benchmark 的出题员。给你一条原文证据片段（单条线索）。
+任务：基于 evidence 生成一个自然问题，并给出可在 evidence 中直接找到的回答。
+
+要求：
+1) 问题与回答都必须只依赖这条 evidence。
+2) 问题里不得出现答案字符串：{target}
+3) 问题长度至少 {min_q_len} 个中文字符。
+4) 回答必须包含答案字符串：{target}
+5) 输出必须是严格 JSON，不要输出任何多余文字。
+
+输出格式：
+{{
+  "question": "...",
+  "answer": "..."
+}}
+
+剧情锚点（建议在问题中出现）：{anchor}
+
+evidence：
+{ev}
+""".strip()
+
+def attribute_lookup_zh(ctx: dict) -> str:
+    """
+    Expected ctx fields:
+      - language (e.g., "zh")
+      - witness: {entity, value, rel_type, evidence, evidence_chunk_id}
+      - answer_max_chars
+    Returns: a prompt that asks the LLM to output JSON: {"question": "..."}.
+    """
+    w = ctx["witness"]
+    entity = w["entity"]
+    value = w["value"]
+    evidence = w["evidence"]
+    rel_type = w["rel_type"]
+
+    # Keep question anchored, and do not leak the answer value.
+    # The answer is deterministic and will be stored by the runner.
+    # We instruct the LLM not to include the exact value in the question.
+    return f"""
+你将基于小说原文片段生成一个“属性查询”问题。
+
+要求：
+- 只输出 JSON，对象包含字段：question
+- question 必须是中文
+- question 必须提到实体“{entity}”
+- question 不得包含答案文本（即不得出现“{value}”）
+- 问题应询问 {entity} 的身份/称号/职务/所在地等属性（根据片段语义自然选择）
+- 片段中可以直接支持该问题
+
+原文片段：
+{evidence}
+
+输出格式示例：
+{{"question": "文中称{entity}是什么身份？"}}
+""".strip()
+
+
+def who_act_what_zh(ctx: Dict[str, Any]) -> str:
+    ans = ctx["final_answer"]
+    ev = ctx["evidence"]
+    min_q_len = ctx["min_question_len"]
+
+    return f"""
+你是长篇小说阅读类 benchmark 的出题员。给你一条原文证据片段（单条线索）。
+任务：基于 evidence 生成一个“谁说了/做了什么”的自然问题，并给出可从 evidence 直接找到的回答（执行者是谁）。
+
+要求：
+1) 问题与回答都必须只依赖这条 evidence。
+2) 问题中不得出现执行者名字：{ans}
+3) 问题长度至少 {min_q_len} 个中文字符。
+4) 回答必须包含执行者名字：{ans}
+5) 输出必须是严格 JSON，不要输出任何多余文字。
+
+输出格式：
+{{
+  "question": "...",
+  "answer": "..."
+}}
+
+evidence：
+{ev}
+""".strip()
+
+
+def local_coref_zh(ctx: Dict[str, Any]) -> str:
+    # required ctx keys
+    evidence = ctx["evidence"]          # single chunk evidence text
+    pronoun = ctx["pronoun"]            # e.g., "那人"/"他"/"她"/"其"
+    ans = ctx["final_answer"]           # canonical entity name, must NOT appear in question
+    min_q_len = ctx["min_question_len"]
+
+    return f"""
+你是长篇小说阅读类 benchmark 的出题员。现在给你一条原文证据片段（单个 chunk 内的上下文）。
+你的任务：写一个“代词/指代消解”问题，要求回答者指出文中“{pronoun}”指的是谁。
+
+严格要求：
+1) 问题必须只依赖这条 evidence 就能回答，不需要多跳推理。
+2) 问题中不得出现答案字符串：{ans}
+3) 问题长度至少 {min_q_len} 个中文字符。
+4) 输出必须是严格 JSON，不要输出任何多余文字。
+
+输出格式：
+{{
+  "question": "...",
+  "answer": "{ans}"
+}}
+
+evidence：
+{evidence}
+""".strip()
+
+def alias_coref_zh(ctx: Dict[str, Any]) -> str:
+    # required ctx keys
+    alias = ctx["alias"]                # surface form used in question (e.g., "老夫人"/"谢周氏"/"她")
+    evidence_pack = ctx["evidence_pack"]  # multi-chunk evidence text (you decide formatting)
+    ans = ctx["final_answer"]           # canonical entity name
+    min_q_len = ctx["min_question_len"]
+
+    return f"""
+你是长篇小说阅读类 benchmark 的出题员。现在给你若干条原文证据片段（来自同一条链路的多个 hop）。
+你的任务：写一个“跨段落身份一致/别名消解”问题，问题中只使用别称/称谓“{alias}”，要求回答者指出其真实是谁。
+
+严格要求：
+1) 问题必须只依赖给定 evidence，就能得出答案，不使用常识补全。
+2) 问题中不得出现答案字符串：{ans}
+3) 问题长度至少 {min_q_len} 个中文字符。
+4) 输出必须是严格 JSON，不要输出任何多余文字。
+
+输出格式：
+{{
+  "question": "...",
+  "answer": "{ans}"
+}}
+
+evidence：
+{evidence_pack}
+""".strip()
+
 PROMPT_BUILDERS = {
     "khop_qa_zh": khop_qa_zh,
+    "single_span_qa_zh": single_span_qa_zh,
+    "attribute_lookup_zh": attribute_lookup_zh,
+    "who_act_what_zh": who_act_what_zh,
+    "local_coref_zh": local_coref_zh,
+    "alias_coref_zh": alias_coref_zh,
+
 }
+
